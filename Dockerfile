@@ -11,8 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar código
 COPY . .
 
+# Dar permisos de ejecución al script
+RUN chmod +x start.sh
+
 # Exponer puerto
 EXPOSE 8000
 
-# Comando de inicio - Railway pasará el puerto como variable de entorno
-CMD uvicorn api_server_supabase:app --host 0.0.0.0 --port ${PORT:-8000}
+# Comando de inicio usando el script bash
+CMD ["./start.sh"]
