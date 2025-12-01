@@ -14,5 +14,5 @@ COPY . .
 # Exponer puerto
 EXPOSE 8000
 
-# Comando de inicio
-CMD ["python", "-m", "uvicorn", "api_server_supabase:app", "--host", "0.0.0.0", "--port", "8000"]
+# Comando de inicio - Railway pasará el puerto como variable de entorno
+CMD uvicorn api_server_supabase:app --host 0.0.0.0 --port ${PORT:-8000}
