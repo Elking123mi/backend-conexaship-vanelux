@@ -11,11 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar código
 COPY . .
 
-# Dar permisos de ejecución al script
-RUN chmod +x start.sh
-
 # Exponer puerto
 EXPOSE 8000
 
-# Comando de inicio usando el script bash
-CMD ["./start.sh"]
+# Comando de inicio usando Python para manejar el puerto
+CMD ["python", "start_server.py"]
