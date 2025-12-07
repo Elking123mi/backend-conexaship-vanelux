@@ -21,13 +21,15 @@ load_dotenv()
 USE_SUPABASE = os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_KEY")
 
 if USE_SUPABASE:
-    from supabase_config import init_supabase, SupabaseDB
+    from supabase_config import init_supabase, SupabaseDB, get_supabase
     print("🟢 Usando SUPABASE (Base de datos en la nube)")
     init_supabase()
+    supabase_client = get_supabase()
 else:
     import sqlite3
     print("🟡 Usando SQLite local")
     DB_PATH = os.path.join(os.path.dirname(__file__), "..", "logistics.db")
+    supabase_client = None
 
 app = FastAPI(title="VaneLux/Conexaship API", version="2.0.0")
 
@@ -513,6 +515,277 @@ def list_bookings(current_user: dict = Depends(get_current_user)):
     
     bookings = get_user_bookings(int(current_user["sub"]))
     return {"bookings": bookings}
+
+# ==================== PRODUCTOS / INVENTARIO ====================
+
+class ProductCreate(BaseModel):
+    sku: str
+    name: str
+    description: Optional[str] = None
+    price: float
+    stock: int = 0
+    category: Optional[str] = "General"
+    expiry_date: Optional[str] = None
+    image_url: Optional[str] = None
+    barcode: Optional[str] = None
+    min_stock: Optional[int] = 0
+    supplier: Optional[str] = None
+    cost_price: Optional[float] = None
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price: Optional[float] = None
+    stock: Optional[int] = None
+    category: Optional[str] = None
+    expiry_date: Optional[str] = None
+    image_url: Optional[str] = None
+    barcode: Optional[str] = None
+    min_stock: Optional[int] = None
+    supplier: Optional[str] = None
+    cost_price: Optional[float] = None
+    status: Optional[str] = None
+
+@app.get("/api/v1/products")
+def list_products(
+    category: Optional[str] = None,
+    status: Optional[str] = "active",
+    search: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """Listar productos (acceso público para Conexaship Public)"""
+    try:
+        if USE_SUPABASE:
+            query = supabase_client.table('products').select('*')
+            
+            if category:
+                query = query.eq('category', category)
+            if status:
+                query = query.eq('status', status)
+            if search:
+                query = query.or_(f"name.ilike.%{search}%,sku.ilike.%{search}%,description.ilike.%{search}%")
+            
+            query = query.range(offset, offset + limit - 1).order('name')
+            response = query.execute()
+            
+            return {"products": response.data or [], "count": len(response.data or [])}
+        else:
+            # SQLite
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            
+            query = "SELECT * FROM products WHERE 1=1"
+            params = []
+            
+            if category:
+                query += " AND category = ?"
+                params.append(category)
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+            if search:
+                query += " AND (name LIKE ? OR sku LIKE ? OR description LIKE ?)"
+                search_term = f"%{search}%"
+                params.extend([search_term, search_term, search_term])
+            
+            query += f" ORDER BY name LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+            
+            cur.execute(query, params)
+            products = [dict(row) for row in cur.fetchall()]
+            conn.close()
+            
+            return {"products": products, "count": len(products)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/products/{sku}")
+def get_product(sku: str):
+    """Obtener producto por SKU (acceso público)"""
+    try:
+        if USE_SUPABASE:
+            response = supabase_client.table('products').select('*').eq('sku', sku).execute()
+            if not response.data:
+                raise HTTPException(status_code=404, detail="Producto no encontrado")
+            return {"product": response.data[0]}
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM products WHERE sku = ?", (sku,))
+            product = cur.fetchone()
+            conn.close()
+            
+            if not product:
+                raise HTTPException(status_code=404, detail="Producto no encontrado")
+            return {"product": dict(product)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/products", status_code=status.HTTP_201_CREATED)
+def create_product(product: ProductCreate, current_user: dict = Depends(get_current_user)):
+    """Crear nuevo producto (requiere autenticación)"""
+    # Verificar roles
+    user_roles = current_user.get("roles", [])
+    if not any(role in ["ceo", "executive", "admin", "manager"] for role in user_roles):
+        raise HTTPException(status_code=403, detail="Permisos insuficientes")
+    
+    try:
+        if USE_SUPABASE:
+            # Verificar si el SKU ya existe
+            check = supabase_client.table('products').select('id').eq('sku', product.sku).execute()
+            if check.data:
+                raise HTTPException(status_code=400, detail="SKU ya existe")
+            
+            # Crear producto
+            new_product = {
+                "sku": product.sku,
+                "name": product.name,
+                "description": product.description,
+                "price": product.price,
+                "stock": product.stock,
+                "category": product.category,
+                "expiry_date": product.expiry_date,
+                "image_url": product.image_url,
+                "barcode": product.barcode,
+                "min_stock": product.min_stock,
+                "supplier": product.supplier,
+                "cost_price": product.cost_price,
+                "status": "active"
+            }
+            
+            response = supabase_client.table('products').insert(new_product).execute()
+            return {"product": response.data[0], "message": "Producto creado exitosamente"}
+        else:
+            # SQLite
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            
+            # Verificar SKU
+            cur.execute("SELECT id FROM products WHERE sku = ?", (product.sku,))
+            if cur.fetchone():
+                conn.close()
+                raise HTTPException(status_code=400, detail="SKU ya existe")
+            
+            cur.execute("""
+                INSERT INTO products (sku, name, description, price, stock, category, expiry_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (product.sku, product.name, product.description, product.price, 
+                  product.stock, product.category, product.expiry_date))
+            
+            conn.commit()
+            product_id = cur.lastrowid
+            
+            cur.execute("SELECT * FROM products WHERE id = ?", (product_id,))
+            conn.row_factory = sqlite3.Row
+            new_product = dict(cur.fetchone())
+            conn.close()
+            
+            return {"product": new_product, "message": "Producto creado exitosamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/v1/products/{sku}")
+def update_product(sku: str, product: ProductUpdate, current_user: dict = Depends(get_current_user)):
+    """Actualizar producto (requiere autenticación)"""
+    user_roles = current_user.get("roles", [])
+    if not any(role in ["ceo", "executive", "admin", "manager"] for role in user_roles):
+        raise HTTPException(status_code=403, detail="Permisos insuficientes")
+    
+    try:
+        # Construir diccionario solo con campos no-None
+        update_data = {k: v for k, v in product.dict().items() if v is not None}
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No hay datos para actualizar")
+        
+        if USE_SUPABASE:
+            response = supabase_client.table('products').update(update_data).eq('sku', sku).execute()
+            if not response.data:
+                raise HTTPException(status_code=404, detail="Producto no encontrado")
+            return {"product": response.data[0], "message": "Producto actualizado exitosamente"}
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            
+            # Construir query dinámica
+            set_clause = ", ".join([f"{k} = ?" for k in update_data.keys()])
+            values = list(update_data.values()) + [sku]
+            
+            cur.execute(f"UPDATE products SET {set_clause} WHERE sku = ?", values)
+            
+            if cur.rowcount == 0:
+                conn.close()
+                raise HTTPException(status_code=404, detail="Producto no encontrado")
+            
+            conn.commit()
+            
+            cur.execute("SELECT * FROM products WHERE sku = ?", (sku,))
+            conn.row_factory = sqlite3.Row
+            updated_product = dict(cur.fetchone())
+            conn.close()
+            
+            return {"product": updated_product, "message": "Producto actualizado exitosamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/v1/products/{sku}")
+def delete_product(sku: str, current_user: dict = Depends(get_current_user)):
+    """Eliminar producto (requiere autenticación CEO/Admin)"""
+    user_roles = current_user.get("roles", [])
+    if not any(role in ["ceo", "admin"] for role in user_roles):
+        raise HTTPException(status_code=403, detail="Solo CEO/Admin pueden eliminar productos")
+    
+    try:
+        if USE_SUPABASE:
+            response = supabase_client.table('products').delete().eq('sku', sku).execute()
+            if not response.data:
+                raise HTTPException(status_code=404, detail="Producto no encontrado")
+            return {"message": f"Producto {sku} eliminado exitosamente"}
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM products WHERE sku = ?", (sku,))
+            
+            if cur.rowcount == 0:
+                conn.close()
+                raise HTTPException(status_code=404, detail="Producto no encontrado")
+            
+            conn.commit()
+            conn.close()
+            return {"message": f"Producto {sku} eliminado exitosamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/products/categories/list")
+def list_categories():
+    """Listar todas las categorías de productos"""
+    try:
+        if USE_SUPABASE:
+            response = supabase_client.table('product_categories').select('*').order('name').execute()
+            return {"categories": response.data or []}
+        else:
+            # Categorías por defecto en SQLite
+            default_categories = [
+                {"id": 1, "name": "Electrónica", "description": "Dispositivos electrónicos y accesorios"},
+                {"id": 2, "name": "Oficina", "description": "Artículos de oficina y papelería"},
+                {"id": 3, "name": "Computación", "description": "Computadoras y accesorios"},
+                {"id": 4, "name": "Hogar", "description": "Artículos para el hogar"},
+                {"id": 5, "name": "General", "description": "Productos generales"}
+            ]
+            return {"categories": default_categories}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
