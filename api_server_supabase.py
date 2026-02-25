@@ -1811,6 +1811,15 @@ def apply_as_driver(application: DriverApplication):
         except Exception as email_error:
             print(f"⚠️ Failed to send email: {email_error}")
             # No fallar el request si el email falla
+
+        # Enviar email de confirmación al conductor
+        try:
+            _send_driver_confirmation_email(
+                to_email=application.email,
+                driver_name=application.full_name
+            )
+        except Exception as email_error:
+            print(f"⚠️ Failed to send confirmation email to driver: {email_error}")
         
         return {
             "success": True,
@@ -2125,6 +2134,66 @@ def driver_set_password(request: dict):
             "status": "active"
         }
     }
+
+
+def _send_driver_confirmation_email(to_email: str, driver_name: str) -> bool:
+    """Envía email de confirmación al conductor cuando envía su aplicación."""
+    mailgun_key = os.getenv('MAILGUN_API_KEY', '')
+    mailgun_domain = os.getenv('MAILGUN_DOMAIN', '')
+    from_email = os.getenv('MAILGUN_FROM_EMAIL', f'noreply@{mailgun_domain}')
+
+    if not mailgun_key or not mailgun_domain:
+        print("⚠️ Mailgun not configured, skipping driver confirmation email")
+        return False
+
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;color:#333;margin:0;padding:0">
+      <div style="background:#0B3254;color:white;padding:40px;text-align:center">
+        <h1 style="margin:0">Thank you, {driver_name}!</h1>
+        <p style="color:#D4AF37;font-size:18px;margin:10px 0 0">We received your Vanelux driver application</p>
+      </div>
+      <div style="padding:30px;max-width:600px;margin:0 auto">
+        <p>Dear <strong>{driver_name}</strong>,</p>
+        <p>We have successfully received your application to join the <strong>Vanelux luxury driver team</strong>. 🎉</p>
+        <p>Our team will carefully review your information and get back to you within <strong>2–5 business days</strong>.</p>
+        <div style="background:#f8f9fa;border-left:4px solid #D4AF37;padding:16px;margin:24px 0;border-radius:4px">
+          <strong>What happens next?</strong><br>
+          <ol style="margin:10px 0;padding-left:20px">
+            <li>Our team reviews your application</li>
+            <li>If approved, you will receive an email with a <strong>one-time link</strong> to create your driver account</li>
+            <li>You set your own password and you're ready to go!</li>
+          </ol>
+        </div>
+        <p>If you have any questions in the meantime, feel free to reach out:</p>
+        <p>📞 <a href="tel:+19175995522" style="color:#0B3254">+1 (917) 599-5522</a><br>
+           ✉️ <a href="mailto:info@vanelux.com" style="color:#0B3254">info@vanelux.com</a><br>
+           💬 <a href="https://wa.me/19175995522" style="color:#25D366">WhatsApp</a></p>
+      </div>
+      <div style="background:#f4f4f4;padding:15px;text-align:center;color:#888;font-size:12px">
+        Vanelux Luxury Transportation — New York City<br>
+        📞 +1 (917) 599-5522 | ✉️ info@vanelux.com
+      </div>
+    </body></html>
+    """
+
+    try:
+        resp = requests.post(
+            f"https://api.mailgun.net/v3/{mailgun_domain}/messages",
+            auth=("api", mailgun_key),
+            data={
+                "from": f"Vanelux <{from_email}>",
+                "to": [to_email],
+                "subject": "✅ We received your Vanelux driver application",
+                "html": html
+            }
+        )
+        success = resp.status_code == 200
+        if not success:
+            print(f"⚠️ Mailgun confirmation error {resp.status_code}: {resp.text}")
+        return success
+    except Exception as e:
+        print(f"⚠️ Driver confirmation email error: {e}")
+        return False
 
 
 def _send_approval_email(to_email: str, driver_name: str, setup_link: str, admin_note: str) -> bool:
