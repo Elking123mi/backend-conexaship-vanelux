@@ -378,16 +378,16 @@ def root():
     }
 
 # ==================== AUTO-ACTUALIZACIÓN ====================
-APP_VERSION = "1.1.0"  # Versión actual de la aplicación de escritorio
-APP_DOWNLOAD_URL = "https://github.com/TU_USUARIO/TU_REPO/releases/download/v1.1.0/LogisticsDashboard.exe"
-APP_CHANGELOG = """🎉 Versión 1.1.0
+APP_VERSION = "1.0.0"  # Versión actual de la aplicación de escritorio
+APP_DOWNLOAD_URL = "https://github.com/TU_USUARIO/TU_REPO/releases/download/v1.0.0/LogisticsDashboard.exe"
+APP_CHANGELOG = """🎉 Versión 1.0.0
 
-✅ Nuevas funcionalidades:
+✅ Funcionalidades actuales:
 - Sistema de aplicaciones de conductores implementado
 - Panel de gestión de reservas web (bookings)
 - Sistema de pagos integrado con Stripe
 - Notificaciones automáticas por email
-- Auto-actualización integrada
+- Auto-actualización automática integrada
 
 🐛 Correcciones:
 - Mejora en validación de tarjetas CCID
