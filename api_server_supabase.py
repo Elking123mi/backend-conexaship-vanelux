@@ -378,8 +378,8 @@ def root():
     }
 
 # ==================== AUTO-ACTUALIZACIÓN ====================
-APP_VERSION = "1.0.0"  # Versión actual de la aplicación de escritorio
-APP_DOWNLOAD_URL = "https://github.com/TU_USUARIO/TU_REPO/releases/download/v1.0.0/LogisticsDashboard.exe"
+APP_VERSION = "1.0.1"  # Versión actual de la aplicación de escritorio
+APP_DOWNLOAD_URL = "https://github.com/Elking123mi/backend-conexaship-vanelux/releases/download/v1.0.1/LogisticsDashboard-v1.0.1.exe"
 APP_CHANGELOG = """🎉 Versión 1.0.0
 
 ✅ Funcionalidades actuales:
