@@ -377,6 +377,42 @@ def root():
         "docs": "/docs"
     }
 
+# ==================== AUTO-ACTUALIZACIÓN ====================
+APP_VERSION = "1.1.0"  # Versión actual de la aplicación de escritorio
+APP_DOWNLOAD_URL = "https://github.com/TU_USUARIO/TU_REPO/releases/download/v1.1.0/LogisticsDashboard.exe"
+APP_CHANGELOG = """🎉 Versión 1.1.0
+
+✅ Nuevas funcionalidades:
+- Sistema de aplicaciones de conductores implementado
+- Panel de gestión de reservas web (bookings)
+- Sistema de pagos integrado con Stripe
+- Notificaciones automáticas por email
+- Auto-actualización integrada
+
+🐛 Correcciones:
+- Mejora en validación de tarjetas CCID
+- Optimización de conexión con Supabase
+
+⚡ Mejoras de rendimiento:
+- Carga más rápida de datos
+- Interfaz más responsiva
+"""
+
+@app.get("/api/v1/app/version")
+def get_app_version():
+    """
+    Endpoint para verificar la última versión disponible de la aplicación
+    Las apps clientes consultan este endpoint al iniciar para verificar actualizaciones
+    """
+    return {
+        "version": APP_VERSION,
+        "download_url": APP_DOWNLOAD_URL,
+        "changelog": APP_CHANGELOG,
+        "mandatory": False,  # Si es True, la app obliga a actualizar
+        "size_mb": 60.0,  # Tamaño aproximado del ejecutable
+        "release_date": "2026-02-26"
+    }
+
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
 def login(req: LoginRequest):
     user_row = get_user_by_username(req.username)
@@ -1853,7 +1889,9 @@ def list_driver_applications(
     """
     payload = verify_token(credentials.credentials)
     roles = payload.get("roles", [])
-    if not any(r in roles for r in ["admin", "manager", "ceo"]):
+    # Normalizar roles a minúsculas para comparación (acepta CEO, ceo, Manager, manager, etc.)
+    normalized_roles = [str(r).lower() for r in roles]
+    if not any(r in normalized_roles for r in ["admin", "manager", "ceo", "executive"]):
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
@@ -1892,7 +1930,9 @@ def approve_driver_application(
     """
     payload = verify_token(credentials.credentials)
     roles = payload.get("roles", [])
-    if not any(r in roles for r in ["admin", "manager", "ceo"]):
+    # Normalizar roles a minúsculas para comparación (acepta CEO, ceo, Manager, manager, etc.)
+    normalized_roles = [str(r).lower() for r in roles]
+    if not any(r in normalized_roles for r in ["admin", "manager", "ceo", "executive"]):
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
@@ -1979,7 +2019,9 @@ def reject_driver_application(
     """Rechaza una aplicación y notifica al conductor por email."""
     payload = verify_token(credentials.credentials)
     roles = payload.get("roles", [])
-    if not any(r in roles for r in ["admin", "manager", "ceo"]):
+    # Normalizar roles a minúsculas para comparación (acepta CEO, ceo, Manager, manager, etc.)
+    normalized_roles = [str(r).lower() for r in roles]
+    if not any(r in normalized_roles for r in ["admin", "manager", "ceo", "executive"]):
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
