@@ -378,16 +378,22 @@ def root():
     }
 
 # ==================== AUTO-ACTUALIZACIÓN ====================
-APP_VERSION = "1.0.1"  # Versión actual de la aplicación de escritorio
-APP_DOWNLOAD_URL = "https://github.com/Elking123mi/backend-conexaship-vanelux/releases/download/v1.0.1/LogisticsDashboard-v1.0.1.exe"
-APP_CHANGELOG = """🎉 Versión 1.0.0
+APP_VERSION = "1.0.2"  # Versión actual de la aplicación de escritorio
+APP_DOWNLOAD_URL = "https://github.com/Elking123mi/backend-conexaship-vanelux/releases/download/v1.0.2/LogisticsDashboard-v1.0.2.exe"
+APP_CHANGELOG = """🎉 Versión 1.0.2
 
-✅ Funcionalidades actuales:
-- Sistema de aplicaciones de conductores implementado
-- Panel de gestión de reservas web (bookings)
-- Sistema de pagos integrado con Stripe
-- Notificaciones automáticas por email
-- Auto-actualización automática integrada
+✨ NUEVAS FUNCIONALIDADES:
+- 📊 Sistema de Reportes VaneLux completo con 6 tipos de reportes
+- 📧 Envío automático de reportes por correo electrónico
+- 💾 Guardado de reportes en formato TXT
+- ⚙️ Configuración de servidor SMTP integrada
+- 📈 Reportes disponibles:
+  * Resumen diario de viajes
+  * Rendimiento por conductor
+  * Reporte financiero mensual
+  * Análisis de demanda
+  * Reporte de incidencias
+  * Estado de flota
 
 🐛 Correcciones:
 - Mejora en validación de tarjetas CCID
