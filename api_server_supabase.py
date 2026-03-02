@@ -126,6 +126,10 @@ class DriverLocationUpdate(BaseModel):
     lng: float
     status: Optional[str] = None  # en_route_to_pickup | arrived_at_pickup | in_progress | completed
 
+class TripRating(BaseModel):
+    rating: int           # 1-5
+    comment: Optional[str] = ""
+
 
 class DriverApplication(BaseModel):
     """Modelo para aplicaciones de conductores"""
@@ -1141,6 +1145,25 @@ def update_driver_location(
         except Exception as e:
             print(f"⚠️ Could not update booking status in DB: {e}")
 
+        # Email automático al cliente cuando el driver sale a buscarlo
+        if location.status in ("en_route_to_pickup", "arrived_at_pickup") and booking:
+            try:
+                client_email = booking.get("guest_email")
+                client_name = f"{booking.get('guest_first_name', '')} {booking.get('guest_last_name', '')}".strip() or "Valued Client"
+                pickup_addr = booking.get("pickup_address", "your pickup location")
+                vehicle = booking.get("vehicle_name", "your vehicle")
+                if client_email:
+                    _send_driver_status_email(
+                        to_email=client_email,
+                        client_name=client_name,
+                        status=location.status,
+                        pickup_address=pickup_addr,
+                        vehicle_name=vehicle,
+                        booking_id=booking_id
+                    )
+            except Exception as mail_err:
+                print(f"⚠️ Status email error: {mail_err}")
+
     return {"success": True, "message": "Location updated"}
 
 
@@ -1197,6 +1220,86 @@ def get_trip_tracking(
             datetime.utcnow() - datetime.fromisoformat(location_data["updated_at"])
         ).seconds < 30  # Activo si se actualizó en los últimos 30 segundos
     }
+
+
+# ==================== CALIFICACIONES / RATINGS ====================
+
+@app.post("/api/v1/vlx/bookings/{booking_id}/rate")
+def rate_trip(
+    booking_id: int,
+    rating_data: TripRating,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Cliente califica el viaje (1-5 estrellas + comentario)."""
+    payload = verify_token(credentials.credentials)
+    user_id = payload.get("user_id") or payload.get("sub")
+
+    if not (1 <= rating_data.rating <= 5):
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+
+    if not USE_SUPABASE:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        booking_resp = supabase_client.table("vlx_bookings").select("id,driver_id,status,guest_email").eq("id", booking_id).execute()
+        if not booking_resp.data:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        booking = booking_resp.data[0]
+        if booking.get("status") != "completed":
+            raise HTTPException(status_code=400, detail="Can only rate completed trips")
+
+        # Upsert para evitar duplicados
+        supabase_client.table("trip_ratings").upsert({
+            "booking_id": booking_id,
+            "driver_id": booking.get("driver_id"),
+            "user_id": user_id,
+            "rating": rating_data.rating,
+            "comment": rating_data.comment or "",
+            "created_at": datetime.utcnow().isoformat()
+        }, on_conflict="booking_id").execute()
+
+        return {"success": True, "message": "Thank you for your rating!"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/vlx/drivers/{driver_id}/ratings")
+def get_driver_ratings(
+    driver_id: str,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Devuelve el promedio y lista de calificaciones de un driver."""
+    verify_token(credentials.credentials)
+
+    if not USE_SUPABASE:
+        return {"average": 0, "count": 0, "ratings": []}
+
+    try:
+        resp = supabase_client.table("trip_ratings").select("*").eq("driver_id", driver_id).order("created_at", desc=True).execute()
+        ratings = resp.data or []
+        avg = round(sum(r["rating"] for r in ratings) / len(ratings), 2) if ratings else 0
+        return {"driver_id": driver_id, "average": avg, "count": len(ratings), "ratings": ratings}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/vlx/bookings/{booking_id}/rating")
+def get_booking_rating(
+    booking_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Devuelve la calificación de un booking específico (si existe)."""
+    verify_token(credentials.credentials)
+    if not USE_SUPABASE:
+        return None
+    try:
+        resp = supabase_client.table("trip_ratings").select("*").eq("booking_id", booking_id).execute()
+        return resp.data[0] if resp.data else None
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ==================== PRODUCTOS / INVENTARIO ====================
@@ -2291,6 +2394,63 @@ def driver_set_password(request: dict):
             "status": "active"
         }
     }
+
+
+def _send_driver_status_email(to_email: str, client_name: str, status: str,
+                              pickup_address: str, vehicle_name: str, booking_id: int) -> bool:
+    """Email automático al cliente cuando el driver marca en_route o arrived."""
+    mailgun_key = os.getenv('MAILGUN_API_KEY', '')
+    mailgun_domain = os.getenv('MAILGUN_DOMAIN', '')
+    from_email = os.getenv('MAILGUN_FROM_EMAIL', f'noreply@{mailgun_domain}')
+    if not mailgun_key or not mailgun_domain:
+        return False
+
+    if status == "en_route_to_pickup":
+        subject = "🚗 Your Vanelux driver is on the way!"
+        headline = "Your driver is heading to you"
+        message = f"Your Vanelux driver is now <strong>on the way</strong> to pick you up at:<br><strong>{pickup_address}</strong>"
+        cta = "Please be ready in the next few minutes."
+        icon = "🚗"
+        color = "#8B5CF6"
+    else:  # arrived_at_pickup
+        subject = "📍 Your driver has arrived — Vanelux"
+        headline = "Your driver has arrived!"
+        message = f"Your Vanelux driver is <strong>waiting for you</strong> at:<br><strong>{pickup_address}</strong>"
+        cta = "Please come out now. Your vehicle is: <strong>{}</strong>".format(vehicle_name)
+        icon = "📍"
+        color = "#10B981"
+
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;color:#333;margin:0;padding:0">
+      <div style="background:#0B3254;color:white;padding:40px;text-align:center">
+        <div style="font-size:48px">{icon}</div>
+        <h1 style="margin:10px 0">{headline}</h1>
+        <p style="color:#D4AF37;margin:0">Booking #{booking_id}</p>
+      </div>
+      <div style="padding:30px;max-width:600px;margin:0 auto">
+        <p>Dear <strong>{client_name}</strong>,</p>
+        <div style="background:{color}15;border-left:4px solid {color};padding:16px;border-radius:4px;margin:20px 0">
+          <p style="margin:0;font-size:16px">{message}</p>
+        </div>
+        <p>{cta}</p>
+        <p>If you need help: 📞 <a href="tel:+19175995522" style="color:#0B3254">+1 (917) 599-5522</a> &nbsp;|
+           💬 <a href="https://wa.me/19175995522" style="color:#25D366">WhatsApp</a></p>
+      </div>
+      <div style="background:#f4f4f4;padding:15px;text-align:center;color:#888;font-size:12px">
+        Vanelux Luxury Transportation — New York City
+      </div>
+    </body></html>
+    """
+    try:
+        resp = requests.post(
+            f"https://api.mailgun.net/v3/{mailgun_domain}/messages",
+            auth=("api", mailgun_key),
+            data={"from": f"Vanelux <{from_email}>", "to": [to_email], "subject": subject, "html": html}
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"⚠️ Driver status email error: {e}")
+        return False
 
 
 def _send_driver_confirmation_email(to_email: str, driver_name: str) -> bool:
