@@ -62,6 +62,10 @@ MAILGUN_FROM_EMAIL = os.getenv("MAILGUN_FROM_EMAIL", "noreply@vanelux.com")
 
 security = HTTPBearer()
 
+# ─── REAL-TIME TRACKING (in-memory, per-process) ─────────────────────────────
+# { booking_id: { lat, lng, status, updated_at, driver_name, driver_phone, vehicle } }
+driver_locations: dict = {}
+
 # ==================== MODELOS ====================
 class LoginRequest(BaseModel):
     username: str
@@ -116,6 +120,12 @@ class BookingCreate(BaseModel):
     guest_first_name: Optional[str] = None
     guest_last_name: Optional[str] = None
     guest_phone: Optional[str] = None
+
+class DriverLocationUpdate(BaseModel):
+    lat: float
+    lng: float
+    status: Optional[str] = None  # en_route_to_pickup | arrived_at_pickup | in_progress | completed
+
 
 class DriverApplication(BaseModel):
     """Modelo para aplicaciones de conductores"""
@@ -378,22 +388,16 @@ def root():
     }
 
 # ==================== AUTO-ACTUALIZACIÓN ====================
-APP_VERSION = "1.0.2"  # Versión actual de la aplicación de escritorio
-APP_DOWNLOAD_URL = "https://github.com/Elking123mi/backend-conexaship-vanelux/releases/download/v1.0.2/LogisticsDashboard-v1.0.2.exe"
-APP_CHANGELOG = """🎉 Versión 1.0.2
+APP_VERSION = "1.0.1"  # Versión actual de la aplicación de escritorio
+APP_DOWNLOAD_URL = "https://github.com/Elking123mi/backend-conexaship-vanelux/releases/download/v1.0.1/LogisticsDashboard-v1.0.1.exe"
+APP_CHANGELOG = """🎉 Versión 1.0.0
 
-✨ NUEVAS FUNCIONALIDADES:
-- 📊 Sistema de Reportes VaneLux completo con 6 tipos de reportes
-- 📧 Envío automático de reportes por correo electrónico
-- 💾 Guardado de reportes en formato TXT
-- ⚙️ Configuración de servidor SMTP integrada
-- 📈 Reportes disponibles:
-  * Resumen diario de viajes
-  * Rendimiento por conductor
-  * Reporte financiero mensual
-  * Análisis de demanda
-  * Reporte de incidencias
-  * Estado de flota
+✅ Funcionalidades actuales:
+- Sistema de aplicaciones de conductores implementado
+- Panel de gestión de reservas web (bookings)
+- Sistema de pagos integrado con Stripe
+- Notificaciones automáticas por email
+- Auto-actualización automática integrada
 
 🐛 Correcciones:
 - Mejora en validación de tarjetas CCID
@@ -1088,6 +1092,111 @@ def update_booking_status(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── REAL-TIME TRACKING ENDPOINTS ───────────────────────────────────────────
+
+@app.put("/api/v1/vlx/bookings/{booking_id}/driver-location")
+def update_driver_location(
+    booking_id: int,
+    location: DriverLocationUpdate,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    El driver actualiza su posición GPS y estado del viaje.
+    Llama cada 5 segundos desde la app del driver.
+    """
+    token_data = verify_token(credentials.credentials)
+    if "vanelux" not in token_data.get("allowed_apps", []):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Obtener info del driver para mostrársela al cliente
+    try:
+        if USE_SUPABASE:
+            booking_resp = supabase_client.table("vlx_bookings").select("*").eq("id", booking_id).execute()
+            booking = booking_resp.data[0] if booking_resp.data else {}
+        else:
+            booking = {}
+    except Exception:
+        booking = {}
+
+    # Actualizar location en memoria
+    driver_locations[str(booking_id)] = {
+        "lat": location.lat,
+        "lng": location.lng,
+        "status": location.status or driver_locations.get(str(booking_id), {}).get("status", "en_route_to_pickup"),
+        "updated_at": datetime.utcnow().isoformat(),
+        "driver_id": token_data.get("sub")
+    }
+
+    # Si se actualiza el status, también actualizar en la DB
+    if location.status and USE_SUPABASE:
+        try:
+            update_data = {"status": location.status, "updated_at": datetime.utcnow().isoformat()}
+            if location.status == "in_progress":
+                update_data["started_at"] = datetime.utcnow().isoformat()
+            elif location.status == "completed":
+                update_data["completed_at"] = datetime.utcnow().isoformat()
+            supabase_client.table("vlx_bookings").update(update_data).eq("id", booking_id).execute()
+        except Exception as e:
+            print(f"⚠️ Could not update booking status in DB: {e}")
+
+    return {"success": True, "message": "Location updated"}
+
+
+@app.get("/api/v1/vlx/bookings/{booking_id}/tracking")
+def get_trip_tracking(
+    booking_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    El cliente consulta la posición en tiempo real del driver.
+    Hace polling cada 5 segundos.
+    """
+    verify_token(credentials.credentials)
+
+    try:
+        if USE_SUPABASE:
+            booking_resp = supabase_client.table("vlx_bookings").select("*").eq("id", booking_id).execute()
+            if not booking_resp.data:
+                raise HTTPException(status_code=404, detail="Booking not found")
+            booking = booking_resp.data[0]
+        else:
+            raise HTTPException(status_code=404, detail="Booking not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    location_data = driver_locations.get(str(booking_id))
+
+    # Intentar obtener info del driver asignado
+    driver_info = None
+    if booking.get("driver_id") and USE_SUPABASE:
+        try:
+            driver_resp = supabase_client.table("users").select("full_name,email,phone").eq("id", booking["driver_id"]).execute()
+            if driver_resp.data:
+                driver_info = driver_resp.data[0]
+        except Exception:
+            pass
+
+    return {
+        "booking_id": booking_id,
+        "booking_status": booking.get("status", "pending"),
+        "pickup_address": booking.get("pickup_address", ""),
+        "pickup_lat": booking.get("pickup_lat"),
+        "pickup_lng": booking.get("pickup_lng"),
+        "destination_address": booking.get("destination_address", ""),
+        "destination_lat": booking.get("destination_lat"),
+        "destination_lng": booking.get("destination_lng"),
+        "pickup_time": booking.get("pickup_time", ""),
+        "vehicle_name": booking.get("vehicle_name", ""),
+        "driver": driver_info,
+        "driver_location": location_data,
+        "tracking_active": location_data is not None and (
+            datetime.utcnow() - datetime.fromisoformat(location_data["updated_at"])
+        ).seconds < 30  # Activo si se actualizó en los últimos 30 segundos
+    }
 
 
 # ==================== PRODUCTOS / INVENTARIO ====================
