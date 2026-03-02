@@ -2134,7 +2134,126 @@ def list_driver_applications(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/vlx/drivers/applications/{application_id}/approve")
+@app.get("/api/v1/admin/test-email")
+def test_mailgun_config(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    Diagnóstico: verifica config de Mailgun y envía un email de prueba al admin.
+    Solo accesible por admin/manager/ceo.
+    """
+    payload = verify_token(credentials.credentials)
+    roles = [str(r).lower() for r in payload.get("roles", [])]
+    if not any(r in roles for r in ["admin", "manager", "ceo", "executive"]):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    mailgun_key  = os.getenv('MAILGUN_API_KEY', '')
+    mailgun_domain = os.getenv('MAILGUN_DOMAIN', '')
+    from_email   = os.getenv('MAILGUN_FROM_EMAIL', '')
+    admin_email  = os.getenv('ADMIN_EMAIL', '')
+    app_base_url = os.getenv('APP_BASE_URL', '')
+
+    config_status = {
+        "MAILGUN_API_KEY":    "SET" if mailgun_key   else "MISSING",
+        "MAILGUN_DOMAIN":     mailgun_domain         or "MISSING",
+        "MAILGUN_FROM_EMAIL": from_email             or "MISSING",
+        "ADMIN_EMAIL":        admin_email            or "MISSING",
+        "APP_BASE_URL":       app_base_url           or "MISSING",
+    }
+
+    if not mailgun_key or not mailgun_domain or not admin_email:
+        return {"config": config_status, "email_test": "SKIPPED - missing vars"}
+
+    # Enviar email de prueba al ADMIN_EMAIL
+    try:
+        resp = requests.post(
+            f"https://api.mailgun.net/v3/{mailgun_domain}/messages",
+            auth=("api", mailgun_key),
+            data={
+                "from": f"Vanelux Test <{from_email or 'noreply@' + mailgun_domain}>",
+                "to": [admin_email],
+                "subject": "[✅ Test] Vanelux Mailgun configuration is working",
+                "text": "This is a test email from your Vanelux backend. Mailgun is configured correctly!"
+            }
+        )
+        return {
+            "config": config_status,
+            "email_test": "SENT" if resp.status_code == 200 else "FAILED",
+            "mailgun_status": resp.status_code,
+            "mailgun_response": resp.text[:300]
+        }
+    except Exception as e:
+        return {"config": config_status, "email_test": "ERROR", "detail": str(e)}
+
+
+@app.post("/api/v1/vlx/drivers/applications/{application_id}/resend-approval")
+def resend_approval_email(
+    application_id: str,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    Reenvía el email de aprobación al conductor (con el mismo token si no expiró,
+    o genera uno nuevo si expiró). Permite al admin solucionar emails perdidos.
+    """
+    payload = verify_token(credentials.credentials)
+    roles = [str(r).lower() for r in payload.get("roles", [])]
+    if not any(r in roles for r in ["admin", "manager", "ceo", "executive"]):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if not USE_SUPABASE:
+        raise HTTPException(status_code=503, detail="Supabase not available")
+
+    result = supabase_client.table('driver_applications').select('*').eq('id', application_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    app_data = result.data[0]
+
+    if app_data['status'] not in ('approved', 'onboarded'):
+        raise HTTPException(status_code=400, detail=f"Application status is '{app_data['status']}', must be approved")
+
+    # Reutilizar token existente o generar uno nuevo
+    setup_token = app_data.get('setup_token')
+    token_valid = False
+    if setup_token:
+        try:
+            jwt.decode(setup_token, SECRET_KEY, algorithms=[ALGORITHM])
+            token_valid = True
+        except Exception:
+            pass
+
+    if not token_valid:
+        new_payload = {
+            "type": "driver_setup",
+            "application_id": application_id,
+            "email": app_data['email'],
+            "full_name": app_data['full_name'],
+            "exp": datetime.utcnow() + timedelta(hours=72)
+        }
+        setup_token = jwt.encode(new_payload, SECRET_KEY, algorithm=ALGORITHM)
+        supabase_client.table('driver_applications').update(
+            {"setup_token": setup_token}
+        ).eq('id', application_id).execute()
+
+    app_base_url = os.getenv("APP_BASE_URL", "https://vanelux.netlify.app")
+    setup_link   = f"{app_base_url}/#/set-password?token={setup_token}"
+
+    email_result = _send_approval_email(
+        to_email=app_data['email'],
+        driver_name=app_data['full_name'],
+        setup_link=setup_link,
+        admin_note=""
+    )
+
+    return {
+        "success": True,
+        "email_sent": email_result["sent"],
+        "email_error": email_result.get("error"),
+        "sent_to": app_data['email'],
+        "setup_link": setup_link,
+        "token_reused": token_valid
+    }
+
+
 def approve_driver_application(
     application_id: str,
     body: DriverApprovalRequest,
@@ -2207,18 +2326,19 @@ def approve_driver_application(
         app_base_url = os.getenv("APP_BASE_URL", "https://vanelux.netlify.app")
         setup_link = f"{app_base_url}/#/set-password?token={setup_token}"
 
-        email_sent = _send_approval_email(
+        email_result = _send_approval_email(
             to_email=app_data['email'],
             driver_name=app_data['full_name'],
             setup_link=setup_link,
             admin_note=body.admin_note or ""
         )
 
-        print(f"✅ Application {application_id} approved. Email sent: {email_sent}")
+        print(f"✅ Application {application_id} approved. Email result: {email_result}")
         return {
             "success": True,
             "message": f"Application approved. Setup email sent to {app_data['email']}",
-            "email_sent": email_sent,
+            "email_sent": email_result["sent"],
+            "email_error": email_result.get("error"),
             "setup_link": setup_link
         }
 
@@ -2513,7 +2633,7 @@ def _send_driver_confirmation_email(to_email: str, driver_name: str) -> bool:
         return False
 
 
-def _send_approval_email(to_email: str, driver_name: str, setup_link: str, admin_note: str) -> bool:
+def _send_approval_email(to_email: str, driver_name: str, setup_link: str, admin_note: str) -> dict:
     """Envía email de aprobación al conductor con enlace para crear contraseña."""
     mailgun_key = os.getenv('MAILGUN_API_KEY', '')
     mailgun_domain = os.getenv('MAILGUN_DOMAIN', '')
@@ -2521,7 +2641,7 @@ def _send_approval_email(to_email: str, driver_name: str, setup_link: str, admin
 
     if not mailgun_key or not mailgun_domain:
         print("⚠️ Mailgun not configured, skipping approval email")
-        return False
+        return {"sent": False, "error": "Mailgun not configured (MAILGUN_API_KEY or MAILGUN_DOMAIN missing)"}
 
     note_html = (
         f'<p style="background:#fff3cd;padding:12px;border-left:4px solid #ffc107">'
@@ -2568,13 +2688,16 @@ def _send_approval_email(to_email: str, driver_name: str, setup_link: str, admin
                 "html": html
             }
         )
-        success = resp.status_code == 200
-        if not success:
-            print(f"⚠️ Mailgun error {resp.status_code}: {resp.text}")
-        return success
+        if resp.status_code == 200:
+            print(f"✅ Approval email queued to {to_email} via Mailgun")
+            return {"sent": True, "error": None}
+        else:
+            err = f"Mailgun {resp.status_code}: {resp.text[:300]}"
+            print(f"⚠️ {err}")
+            return {"sent": False, "error": err}
     except Exception as e:
-        print(f"⚠️ Approval email error: {e}")
-        return False
+        print(f"⚠️ Approval email exception: {e}")
+        return {"sent": False, "error": str(e)}
 
 
 def _send_rejection_email(to_email: str, driver_name: str, reason: str) -> bool:
