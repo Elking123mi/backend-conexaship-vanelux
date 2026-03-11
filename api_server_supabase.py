@@ -2593,41 +2593,97 @@ def driver_set_password(setup: DriverPasswordSetup):
                 detail="Esta aplicación no está aprobada"
             )
         
-        # Verificar que no exista ya cuenta con ese email
+        # Verificar si ya existe cuenta con ese email
+        existing_user = None
         if USE_SUPABASE:
             existing = supabase_client.table('users')\
-                .select('id')\
+                .select('*')\
                 .eq('email', email)\
                 .execute()
             
             if existing.data:
-                raise HTTPException(status_code=400, detail="Ya existe una cuenta con este email")
+                existing_user = existing.data[0]
         else:
             conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
-            if cursor.fetchone():
-                conn.close()
-                raise HTTPException(status_code=400, detail="Ya existe una cuenta con este email")
+            cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+            row = cursor.fetchone()
+            if row:
+                existing_user = dict(row)
             conn.close()
         
-        # Hash de la contraseña
-        hashed_password = bcrypt.hashpw(setup.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        
-        # Crear username del email (parte antes del @)
-        username = email.split('@')[0]
-        
-        # Crear usuario usando create_user_db
-        user = create_user_db(
-            username=username,
-            email=email,
-            password_hash=hashed_password,
-            full_name=full_name,
-            roles=['driver'],
-            allowed_apps=['vanelux', 'vanelux_driver']
-        )
-        
-        user_id = user['id']
+        # Si existe usuario, agregar rol "driver" a sus roles actuales
+        if existing_user:
+            print(f"✅ Usuario existente {email} - Agregando rol 'driver'")
+            user_id = existing_user['id']
+            
+            # Obtener roles actuales
+            current_roles = existing_user.get('roles', [])
+            if isinstance(current_roles, str):
+                try:
+                    current_roles = json.loads(current_roles)
+                except:
+                    current_roles = []
+            
+            # Agregar "driver" a los roles (si no lo tiene)
+            updated_roles = list(set(current_roles + ['driver']))
+            
+            # Obtener apps actuales
+            current_apps = existing_user.get('allowed_apps', [])
+            if isinstance(current_apps, str):
+                try:
+                    current_apps = json.loads(current_apps)
+                except:
+                    current_apps = ['vanelux']
+            
+            # Agregar "vanelux_driver"
+            updated_apps = list(set(current_apps + ['vanelux', 'vanelux_driver']))
+            
+            # Hash de la nueva contraseña
+            hashed_password = bcrypt.hashpw(setup.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            
+            # Actualizar usuario: roles, apps, y contraseña
+            if USE_SUPABASE:
+                supabase_client.table('users').update({
+                    'roles': updated_roles,
+                    'allowed_apps': updated_apps,
+                    'password_hash': hashed_password
+                }).eq('id', user_id).execute()
+            else:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE users SET roles = ?, allowed_apps = ?, password_hash = ? WHERE id = ?",
+                    (json.dumps(updated_roles), json.dumps(updated_apps), hashed_password, user_id)
+                )
+                conn.commit()
+                conn.close()
+            
+            full_name = existing_user.get('full_name', full_name)
+            username = existing_user.get('username', email.split('@')[0])
+            
+        else:
+            # No existe usuario, crear uno nuevo
+            print(f"✨ Creando nueva cuenta de driver para {email}")
+            
+            # Hash de la contraseña
+            hashed_password = bcrypt.hashpw(setup.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            
+            # Crear username del email (parte antes del @)
+            username = email.split('@')[0]
+            
+            # Crear usuario usando create_user_db
+            user = create_user_db(
+                username=username,
+                email=email,
+                password_hash=hashed_password,
+                full_name=full_name,
+                roles=['driver'],
+                allowed_apps=['vanelux', 'vanelux_driver']
+            )
+            
+            user_id = user['id']
         
         # Actualizar aplicación a status "onboarded" y vincular user_id
         update_data = {
