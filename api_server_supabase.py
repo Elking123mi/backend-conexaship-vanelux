@@ -1865,7 +1865,7 @@ def send_driver_approval_email(driver_email: str, driver_name: str, setup_token:
     """
     Envía email al conductor con link único de registro de una sola vez.
     """
-    app_base_url = os.getenv('APP_BASE_URL', 'https://vanelux.netlify.app')
+    app_base_url = os.getenv('APP_BASE_URL', 'https://vane-lux.com')
     setup_link = f"{app_base_url}/#/set-password?token={setup_token}"
     
     html_body = f"""
@@ -2137,7 +2137,7 @@ def approve_application_by_admin(application_id: str, action: ApplicationAction)
             expires_at=expires_at.strftime('%Y-%m-%d %H:%M UTC')
         )
         
-        app_base_url = os.getenv('APP_BASE_URL', 'https://vanelux.netlify.app')
+        app_base_url = os.getenv('APP_BASE_URL', 'https://vane-lux.com')
         setup_link = f"{app_base_url}/#/set-password?token={setup_token}"
         
         return {
@@ -2319,7 +2319,7 @@ def resend_approval_email(application_id: str):
             expires_at=expires_at.strftime('%Y-%m-%d %H:%M UTC')
         )
         
-        app_base_url = os.getenv('APP_BASE_URL', 'https://vanelux.netlify.app')
+        app_base_url = os.getenv('APP_BASE_URL', 'https://vane-lux.com')
         setup_link = f"{app_base_url}/#/set-password?token={setup_token}"
         
         return {
