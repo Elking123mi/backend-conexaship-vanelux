@@ -1861,12 +1861,12 @@ def apply_as_driver(application: DriverApplication):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def send_driver_approval_email(driver_email: str, driver_name: str, registration_token: str, expires_at: str):
+def send_driver_approval_email(driver_email: str, driver_name: str, setup_token: str, expires_at: str):
     """
     Envía email al conductor con link único de registro de una sola vez.
     """
-    backend_url = os.getenv('BACKEND_URL', 'https://web-production-700fe.up.railway.app')
-    registration_link = f"{backend_url}/api/v1/vlx/drivers/register?token={registration_token}"
+    app_base_url = os.getenv('APP_BASE_URL', 'https://vanelux.netlify.app')
+    setup_link = f"{app_base_url}/#/set-password?token={setup_token}"
     
     html_body = f"""
     <!DOCTYPE html>
@@ -1899,10 +1899,14 @@ def send_driver_approval_email(driver_email: str, driver_name: str, registration
             <p>Para activar tu cuenta, necesitas completar tu registro haciendo click en el siguiente botón:</p>
             
             <div style="text-align: center;">
-                <a href="{registration_link}" class="button">
-                    🚗 COMPLETAR MI REGISTRO
+                <a href="{setup_link}" class="button" style="background-color: #D4AF37; color: #0B3254;">
+                    ✅ Create My Password
                 </a>
             </div>
+            
+            <p style="text-align: center; font-size: 12px; color: #666;">
+                Or copy this link: <a href="{setup_link}">{setup_link}</a>
+            </p>
             
             <div class="warning">
                 <strong>⚠️ Importante:</strong>
@@ -1925,14 +1929,14 @@ def send_driver_approval_email(driver_email: str, driver_name: str, registration
         </div>
 
         <div class="footer">
-            <p>Este email fue generado automáticamente por el sistema de VaneLux.</p>
-            <p>Si no solicitaste ser conductor, ignora este mensaje.</p>
+            <p><strong>Vanelux</strong> | +1 (917) 599-5522 | info@vanelux.com</p>
+            <p style="font-size: 11px; color: #999;">This email was generated automatically. If you didn't apply to be a driver, please ignore this message.</p>
         </div>
     </body>
     </html>
     """
     
-    subject = "🎉 ¡Aprobado! Completa tu Registro en VaneLux"
+    subject = "🎉 Your Vanelux Driver Application is Approved — Create Your Password"
     
     # Enviar usando Mailgun API
     if not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
@@ -2089,16 +2093,22 @@ def approve_application_by_admin(application_id: str, action: ApplicationAction)
                 detail=f"Cannot approve application with status: {application['status']}"
             )
         
-        # Generar token de registro (válido por 24 horas)
-        registration_token = str(uuid.uuid4())
-        expires_at = datetime.utcnow() + timedelta(hours=24)
+        # Generar JWT token de setup (válido por 72 horas)
+        expires_at = datetime.utcnow() + timedelta(hours=72)
+        setup_token_data = {
+            'type': 'driver_setup',
+            'application_id': application_id,
+            'email': application['email'],
+            'full_name': application['full_name'],
+            'exp': expires_at
+        }
+        setup_token = jwt.encode(setup_token_data, SECRET_KEY, algorithm=ALGORITHM)
         
         # Actualizar aplicación
         update_data = {
             'status': 'approved',
             'approved_at': datetime.utcnow().isoformat(),
-            'registration_token': registration_token,
-            'registration_token_expires': expires_at.isoformat(),
+            'setup_token': setup_token,
             'admin_note': action.admin_note
         }
         
@@ -2112,28 +2122,30 @@ def approve_application_by_admin(application_id: str, action: ApplicationAction)
             cursor = conn.cursor()
             cursor.execute(
                 """UPDATE driver_applications 
-                   SET status = ?, approved_at = ?, registration_token = ?, 
-                       registration_token_expires = ?, admin_note = ?
+                   SET status = ?, approved_at = ?, setup_token = ?, admin_note = ?
                    WHERE id = ?""",
-                ('approved', update_data['approved_at'], registration_token,
-                 update_data['registration_token_expires'], action.admin_note, application_id)
+                ('approved', update_data['approved_at'], setup_token, action.admin_note, application_id)
             )
             conn.commit()
             conn.close()
         
-        # Enviar email al conductor con link de registro
+        # Enviar email al conductor con link de setup
         email_sent = send_driver_approval_email(
             driver_email=application['email'],
             driver_name=application['full_name'],
-            registration_token=registration_token,
+            setup_token=setup_token,
             expires_at=expires_at.strftime('%Y-%m-%d %H:%M UTC')
         )
         
+        app_base_url = os.getenv('APP_BASE_URL', 'https://vanelux.netlify.app')
+        setup_link = f"{app_base_url}/#/set-password?token={setup_token}"
+        
         return {
             "success": True,
-            "message": f"Application approved. Registration email sent to {application['email']}",
+            "message": f"Application approved. Setup email sent to {application['email']}",
             "email_sent": email_sent,
-            "registration_token_expires": expires_at.isoformat()
+            "email_error": None if email_sent else "Failed to send email",
+            "setup_link": setup_link
         }
         
     except HTTPException:
@@ -2224,6 +2236,103 @@ def reject_application_by_admin(application_id: str, action: ApplicationAction):
         raise
     except Exception as e:
         print(f"❌ Error rejecting application: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/vlx/drivers/applications/{application_id}/resend-approval")
+def resend_approval_email(application_id: str):
+    """
+    Reenviar email de aprobación a un driver (si no recibió el email o expiró el token).
+    """
+    try:
+        # Obtener la aplicación
+        if USE_SUPABASE:
+            result = supabase_client.table('driver_applications')\
+                .select('*')\
+                .eq('id', application_id)\
+                .single()\
+                .execute()
+            
+            if not result.data:
+                raise HTTPException(status_code=404, detail="Application not found")
+            
+            application = result.data
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM driver_applications WHERE id = ?",
+                (application_id,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Application not found")
+            
+            application = {
+                'id': row[0],
+                'full_name': row[1],
+                'email': row[2],
+                'status': row[-7]
+            }
+        
+        # Verificar que esté aprobada
+        if application['status'] != 'approved':
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot resend email for application with status: {application['status']}"
+            )
+        
+        # Generar nuevo JWT token de setup (válido por 72 horas)
+        expires_at = datetime.utcnow() + timedelta(hours=72)
+        setup_token_data = {
+            'type': 'driver_setup',
+            'application_id': application_id,
+            'email': application['email'],
+            'full_name': application['full_name'],
+            'exp': expires_at
+        }
+        setup_token = jwt.encode(setup_token_data, SECRET_KEY, algorithm=ALGORITHM)
+        
+        # Actualizar setup_token en BD
+        if USE_SUPABASE:
+            supabase_client.table('driver_applications')\
+                .update({'setup_token': setup_token})\
+                .eq('id', application_id)\
+                .execute()
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE driver_applications SET setup_token = ? WHERE id = ?",
+                (setup_token, application_id)
+            )
+            conn.commit()
+            conn.close()
+        
+        # Reenviar email
+        email_sent = send_driver_approval_email(
+            driver_email=application['email'],
+            driver_name=application['full_name'],
+            setup_token=setup_token,
+            expires_at=expires_at.strftime('%Y-%m-%d %H:%M UTC')
+        )
+        
+        app_base_url = os.getenv('APP_BASE_URL', 'https://vanelux.netlify.app')
+        setup_link = f"{app_base_url}/#/set-password?token={setup_token}"
+        
+        return {
+            "success": True,
+            "email_sent": email_sent,
+            "sent_to": application['email'],
+            "setup_link": setup_link
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error resending approval email: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2410,12 +2519,182 @@ def reject_driver_application(application_id: str, token: str, reason: Optional[
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Modelo para registro de conductor
+# Modelo para registro de conductor (set password)
+class DriverPasswordSetup(BaseModel):
+    token: str
+    password: str
+
+
+@app.post("/api/v1/auth/driver-set-password")
+def driver_set_password(setup: DriverPasswordSetup):
+    """
+    Endpoint para que el conductor cree su contraseña usando el JWT token del email.
+    Crea la cuenta de usuario y genera tokens de acceso automáticamente.
+    """
+    try:
+        # Validar y decodificar JWT token
+        try:
+            payload = jwt.decode(setup.token, SECRET_KEY, algorithms=[ALGORITHM])
+            
+            # Verificar que sea un token de driver setup
+            if payload.get('type') != 'driver_setup':
+                raise HTTPException(status_code=400, detail="Token inválido")
+            
+            application_id = payload.get('application_id')
+            email = payload.get('email')
+            full_name = payload.get('full_name')
+            
+            if not all([application_id, email, full_name]):
+                raise HTTPException(status_code=400, detail="Token inválido")
+                
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=400, detail="Este enlace ha expirado. Por favor, solicita uno nuevo.")
+        except jwt.InvalidTokenError:
+            raise HTTPException(status_code=400, detail="Token inválido")
+        
+        # Verificar password mínimo 8 caracteres
+        if len(setup.password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        
+        # Obtener la aplicación
+        if USE_SUPABASE:
+            result = supabase_client.table('driver_applications')\
+                .select('*')\
+                .eq('id', application_id)\
+                .single()\
+                .execute()
+            
+            if not result.data:
+                raise HTTPException(status_code=404, detail="Application not found")
+            
+            application = result.data
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM driver_applications WHERE id = ?", (application_id,))
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Application not found")
+            
+            application = {
+                'id': row[0],
+                'full_name': row[1],
+                'email': row[2],
+                'phone': row[3],
+                'status': row[-7]
+            }
+        
+        # Verificar que esté aprobada
+        if application['status'] != 'approved':
+            raise HTTPException(
+                status_code=400,
+                detail="Esta aplicación no está aprobada"
+            )
+        
+        # Verificar que no exista ya cuenta con ese email
+        if USE_SUPABASE:
+            existing = supabase_client.table('users')\
+                .select('id')\
+                .eq('email', email)\
+                .execute()
+            
+            if existing.data:
+                raise HTTPException(status_code=400, detail="Ya existe una cuenta con este email")
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+            if cursor.fetchone():
+                conn.close()
+                raise HTTPException(status_code=400, detail="Ya existe una cuenta con este email")
+            conn.close()
+        
+        # Hash de la contraseña
+        hashed_password = bcrypt.hashpw(setup.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # Crear username del email (parte antes del @)
+        username = email.split('@')[0]
+        
+        # Crear usuario usando create_user_db
+        user = create_user_db(
+            username=username,
+            email=email,
+            password_hash=hashed_password,
+            full_name=full_name,
+            roles=['driver'],
+            allowed_apps=['vanelux', 'vanelux_driver']
+        )
+        
+        user_id = user['id']
+        
+        # Actualizar aplicación a status "onboarded" y vincular user_id
+        update_data = {
+            'status': 'onboarded',
+            'user_id': user_id,
+            'setup_token': None  # Invalidar token
+        }
+        
+        if USE_SUPABASE:
+            supabase_client.table('driver_applications')\
+                .update(update_data)\
+                .eq('id', application_id)\
+                .execute()
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE driver_applications SET status = ?, user_id = ?, setup_token = NULL WHERE id = ?",
+                ('onboarded', user_id, application_id)
+            )
+            conn.commit()
+            conn.close()
+        
+        # Generar access token y refresh token
+        access_token = create_access_token({
+            'sub': str(user_id),
+            'email': email,
+            'roles': ['driver']
+        })
+        
+        refresh_token, refresh_expires = create_refresh_token(user_id)
+        save_refresh_token(user_id, refresh_token, refresh_expires)
+        
+        print(f"✅ Driver account created for {email} (user_id={user_id})")
+        
+        return {
+            "success": True,
+            "message": "¡Cuenta creada! Bienvenido a Vanelux.",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            "user": {
+                "id": user_id,
+                "email": email,
+                "full_name": full_name,
+                "username": username,
+                "roles": ["driver"],
+                "allowed_apps": ["vanelux", "vanelux_driver"],
+                "status": "active"
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in driver set password: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Modelo legacy para compatibilidad
 class DriverRegistration(BaseModel):
     password: str
     username: Optional[str] = None
 
-
+# Endpoint legacy - mantener por compatibilidad
 @app.post("/api/v1/vlx/drivers/register")
 def register_driver(token: str, registration: DriverRegistration):
     """
