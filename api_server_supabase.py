@@ -15,6 +15,7 @@ import os
 from dotenv import load_dotenv
 import stripe
 import requests
+import uuid
 
 # Cargar variables de entorno
 load_dotenv()
@@ -171,6 +172,10 @@ class BookingStatusUpdate(BaseModel):
     """Modelo para actualizar el estado de un booking"""
     status: str  # pending, assigned, in_progress, completed, cancelled
     notes: Optional[str] = None
+
+class ApplicationAction(BaseModel):
+    """Modelo para aprobar/rechazar aplicación de conductor"""
+    admin_note: Optional[str] = None
 
 # ==================== FUNCIONES DE BASE DE DATOS ====================
 
@@ -1511,11 +1516,13 @@ def confirm_payment(
 
 # ==================== CONDUCTORES / DRIVERS ====================
 
-def send_driver_application_email(application_data: dict, application_id: str):
+def send_driver_application_email(application_data: dict, application_id: str, approval_token: str):
     """
     Envía email al admin con los datos de la aplicación del conductor usando Mailgun API.
+    Incluye botones para aprobar/rechazar.
     """
     admin_email = os.getenv('ADMIN_EMAIL', 'admin@vanelux.com')
+    backend_url = os.getenv('BACKEND_URL', 'https://web-production-700fe.up.railway.app')
     
     # Formatear boolean a texto
     background_check_text = "✅ Sí" if application_data.get('has_background_check') else "❌ No"
@@ -1536,6 +1543,12 @@ def send_driver_application_email(application_data: dict, application_id: str):
             .value {{ display: inline-block; }}
             .footer {{ background-color: #f4f4f4; padding: 15px; text-align: center; margin-top: 30px; }}
             .alert {{ background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; }}
+            .button-container {{ text-align: center; margin: 30px 0; }}
+            .btn {{ display: inline-block; padding: 15px 40px; margin: 10px; text-decoration: none; color: white; border-radius: 5px; font-weight: bold; font-size: 16px; }}
+            .btn-approve {{ background-color: #10b981; }}
+            .btn-approve:hover {{ background-color: #059669; }}
+            .btn-reject {{ background-color: #ef4444; }}
+            .btn-reject:hover {{ background-color: #dc2626; }}
         </style>
     </head>
     <body>
@@ -1632,6 +1645,15 @@ def send_driver_application_email(application_data: dict, application_id: str):
             <div class="section">
                 <h3>📝 Notas Adicionales</h3>
                 <p>{application_data.get('additional_notes', 'Ninguna')}</p>
+            </div>
+            
+            <div class="button-container">
+                <a href="{backend_url}/api/v1/vlx/drivers/approve/{application_id}?token={approval_token}" class="btn btn-approve">
+                    ✅ APROBAR CONDUCTOR
+                </a>
+                <a href="{backend_url}/api/v1/vlx/drivers/reject/{application_id}?token={approval_token}" class="btn btn-reject">
+                    ❌ RECHAZAR SOLICITUD
+                </a>
             </div>
         </div>
 
@@ -1801,12 +1823,25 @@ def apply_as_driver(application: DriverApplication):
         
         print(f"✅ Driver application saved: {application_id}")
         
+        # Obtener approval_token de Supabase
+        approval_token = None
+        try:
+            if USE_SUPABASE:
+                result = supabase_client.table('driver_applications').select('approval_token').eq('id', application_id).single().execute()
+                approval_token = str(result.data['approval_token'])
+            else:
+                approval_token = str(uuid.uuid4())
+        except Exception as e:
+            print(f"⚠️ Could not get approval_token: {e}")
+            approval_token = str(uuid.uuid4())
+        
         # Enviar email al admin
         email_sent = False
         try:
             email_sent = send_driver_application_email(
                 application_data=application.dict(),
-                application_id=str(application_id)
+                application_id=str(application_id),
+                approval_token=approval_token
             )
         except Exception as email_error:
             print(f"⚠️ Failed to send email: {email_error}")
@@ -1823,6 +1858,689 @@ def apply_as_driver(application: DriverApplication):
         raise
     except Exception as e:
         print(f"❌ Error in driver application: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def send_driver_approval_email(driver_email: str, driver_name: str, registration_token: str, expires_at: str):
+    """
+    Envía email al conductor con link único de registro de una sola vez.
+    """
+    backend_url = os.getenv('BACKEND_URL', 'https://web-production-700fe.up.railway.app')
+    registration_link = f"{backend_url}/api/v1/vlx/drivers/register?token={registration_token}"
+    
+    html_body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .header {{ background-color: #10b981; color: white; padding: 30px; text-align: center; }}
+            .content {{ padding: 30px; max-width: 600px; margin: 0 auto; }}
+            .button {{ display: inline-block; padding: 15px 40px; background-color: #3b82f6; color: white; text-decoration: none; border-radius: 5px; font-weight: bold; margin: 20px 0; }}
+            .footer {{ background-color: #f4f4f4; padding: 15px; text-align: center; margin-top: 30px; font-size: 12px; color: #666; }}
+            .alert {{ background-color: #dcfce7; border-left: 4px solid: #10b981; padding: 15px; margin: 20px 0; }}
+            .warning {{ background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🎉 ¡Felicidades {driver_name}!</h1>
+        </div>
+        
+        <div class="content">
+            <div class="alert">
+                <strong>✅ Tu aplicación ha sido APROBADA</strong>
+            </div>
+            
+            <p>Nos complace informarte que tu solicitud para ser conductor de VaneLux ha sido aprobada.</p>
+            
+            <h3>📝 Próximo Paso: Completar tu Registro</h3>
+            <p>Para activar tu cuenta, necesitas completar tu registro haciendo click en el siguiente botón:</p>
+            
+            <div style="text-align: center;">
+                <a href="{registration_link}" class="button">
+                    🚗 COMPLETAR MI REGISTRO
+                </a>
+            </div>
+            
+            <div class="warning">
+                <strong>⚠️ Importante:</strong>
+                <ul>
+                    <li>Este link es de <strong>una sola vez</strong> y expira el {expires_at}</li>
+                    <li>Una vez que completes el registro, no podrás volver a usar este link</li>
+                    <li>Asegúrate de crear una contraseña segura</li>
+                </ul>
+            </div>
+            
+            <h3>📱 ¿Qué sigue después del registro?</h3>
+            <ol>
+                <li>Descarga la app de VaneLux Driver en tu teléfono</li>
+                <li>Inicia sesión con tu email y contraseña</li>
+                <li>Completa tu perfil y documentos</li>
+                <li>¡Empieza a recibir solicitudes de viaje!</li>
+            </ol>
+            
+            <p><strong>¿Tienes preguntas?</strong> Responde a este email y te ayudaremos.</p>
+        </div>
+
+        <div class="footer">
+            <p>Este email fue generado automáticamente por el sistema de VaneLux.</p>
+            <p>Si no solicitaste ser conductor, ignora este mensaje.</p>
+        </div>
+    </body>
+    </html>
+    """
+    
+    subject = "🎉 ¡Aprobado! Completa tu Registro en VaneLux"
+    
+    # Enviar usando Mailgun API
+    if not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
+        print("⚠️ Mailgun not configured - email not sent")
+        return False
+    
+    from_email = MAILGUN_FROM_EMAIL if MAILGUN_FROM_EMAIL else f"VaneLux <mailgun@{MAILGUN_DOMAIN}>"
+    
+    try:
+        response = requests.post(
+            f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
+            auth=("api", MAILGUN_API_KEY),
+            data={
+                "from": from_email,
+                "to": driver_email,
+                "subject": subject,
+                "html": html_body
+            }
+        )
+        
+        if response.status_code == 200:
+            print(f"✅ Driver approval email sent to {driver_email}")
+            return True
+        else:
+            print(f"❌ Failed to send approval email: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Error sending approval email: {str(e)}")
+        return False
+
+
+@app.get("/api/v1/vlx/drivers/applications")
+def get_driver_applications(status: Optional[str] = None):
+    """
+    Obtener lista de aplicaciones de conductores.
+    Filtro opcional por status: pending, approved, rejected
+    """
+    try:
+        if USE_SUPABASE:
+            query = supabase_client.table('driver_applications').select('*')
+            
+            if status:
+                query = query.eq('status', status)
+            
+            query = query.order('created_at', desc=True)
+            result = query.execute()
+            applications = result.data
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            
+            if status:
+                cursor.execute(
+                    """SELECT id, full_name, email, phone, driver_license, license_expiry_date,
+                       vehicle_type, vehicle_make, vehicle_model, vehicle_year, vehicle_color,
+                       license_plate, insurance_company, insurance_policy_number, insurance_expiry_date,
+                       years_of_experience, languages, has_background_check, additional_notes,
+                       status, created_at, approved_at, rejected_at, rejection_reason
+                       FROM driver_applications WHERE status = ? ORDER BY created_at DESC""",
+                    (status,)
+                )
+            else:
+                cursor.execute(
+                    """SELECT id, full_name, email, phone, driver_license, license_expiry_date,
+                       vehicle_type, vehicle_make, vehicle_model, vehicle_year, vehicle_color,
+                       license_plate, insurance_company, insurance_policy_number, insurance_expiry_date,
+                       years_of_experience, languages, has_background_check, additional_notes,
+                       status, created_at, approved_at, rejected_at, rejection_reason
+                       FROM driver_applications ORDER BY created_at DESC"""
+                )
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            applications = []
+            for row in rows:
+                applications.append({
+                    'id': row[0],
+                    'full_name': row[1],
+                    'email': row[2],
+                    'phone': row[3],
+                    'driver_license': row[4],
+                    'license_expiry_date': row[5],
+                    'vehicle_type': row[6],
+                    'vehicle_make': row[7],
+                    'vehicle_model': row[8],
+                    'vehicle_year': row[9],
+                    'vehicle_color': row[10],
+                    'license_plate': row[11],
+                    'insurance_company': row[12],
+                    'insurance_policy_number': row[13],
+                    'insurance_expiry_date': row[14],
+                    'years_of_experience': row[15],
+                    'languages': row[16],
+                    'has_background_check': bool(row[17]),
+                    'additional_notes': row[18],
+                    'status': row[19],
+                    'created_at': row[20],
+                    'approved_at': row[21],
+                    'rejected_at': row[22],
+                    'rejection_reason': row[23]
+                })
+        
+        return {"applications": applications, "count": len(applications)}
+        
+    except Exception as e:
+        print(f"❌ Error fetching driver applications: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/vlx/drivers/applications/{application_id}/approve")
+def approve_application_by_admin(application_id: str, action: ApplicationAction):
+    """
+    Endpoint para que el admin apruebe una aplicación desde el panel de control.
+    Genera un token de registro único y envía email al conductor.
+    """
+    try:
+        # Obtener la aplicación
+        if USE_SUPABASE:
+            result = supabase_client.table('driver_applications')\
+                .select('*')\
+                .eq('id', application_id)\
+                .single()\
+                .execute()
+            
+            if not result.data:
+                raise HTTPException(status_code=404, detail="Application not found")
+            
+            application = result.data
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM driver_applications WHERE id = ?",
+                (application_id,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Application not found")
+            
+            application = {
+                'id': row[0],
+                'full_name': row[1],
+                'email': row[2],
+                'status': row[-7]
+            }
+        
+        # Verificar que está pendiente
+        if application['status'] != 'pending':
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot approve application with status: {application['status']}"
+            )
+        
+        # Generar token de registro (válido por 24 horas)
+        registration_token = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + timedelta(hours=24)
+        
+        # Actualizar aplicación
+        update_data = {
+            'status': 'approved',
+            'approved_at': datetime.utcnow().isoformat(),
+            'registration_token': registration_token,
+            'registration_token_expires': expires_at.isoformat(),
+            'admin_note': action.admin_note
+        }
+        
+        if USE_SUPABASE:
+            supabase_client.table('driver_applications')\
+                .update(update_data)\
+                .eq('id', application_id)\
+                .execute()
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE driver_applications 
+                   SET status = ?, approved_at = ?, registration_token = ?, 
+                       registration_token_expires = ?, admin_note = ?
+                   WHERE id = ?""",
+                ('approved', update_data['approved_at'], registration_token,
+                 update_data['registration_token_expires'], action.admin_note, application_id)
+            )
+            conn.commit()
+            conn.close()
+        
+        # Enviar email al conductor con link de registro
+        email_sent = send_driver_approval_email(
+            driver_email=application['email'],
+            driver_name=application['full_name'],
+            registration_token=registration_token,
+            expires_at=expires_at.strftime('%Y-%m-%d %H:%M UTC')
+        )
+        
+        return {
+            "success": True,
+            "message": f"Application approved. Registration email sent to {application['email']}",
+            "email_sent": email_sent,
+            "registration_token_expires": expires_at.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error approving application: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/vlx/drivers/applications/{application_id}/reject")
+def reject_application_by_admin(application_id: str, action: ApplicationAction):
+    """
+    Endpoint para que el admin rechace una aplicación desde el panel de control.
+    """
+    try:
+        # Obtener la aplicación
+        if USE_SUPABASE:
+            result = supabase_client.table('driver_applications')\
+                .select('*')\
+                .eq('id', application_id)\
+                .single()\
+                .execute()
+            
+            if not result.data:
+                raise HTTPException(status_code=404, detail="Application not found")
+            
+            application = result.data
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM driver_applications WHERE id = ?",
+                (application_id,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Application not found")
+            
+            application = {
+                'id': row[0],
+                'full_name': row[1],
+                'email': row[2],
+                'status': row[-7]
+            }
+        
+        # Verificar que está pendiente
+        if application['status'] != 'pending':
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot reject application with status: {application['status']}"
+            )
+        
+        # Actualizar aplicación
+        update_data = {
+            'status': 'rejected',
+            'rejected_at': datetime.utcnow().isoformat(),
+            'rejection_reason': action.admin_note or 'No reason provided',
+            'admin_note': action.admin_note
+        }
+        
+        if USE_SUPABASE:
+            supabase_client.table('driver_applications')\
+                .update(update_data)\
+                .eq('id', application_id)\
+                .execute()
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE driver_applications 
+                   SET status = ?, rejected_at = ?, rejection_reason = ?, admin_note = ?
+                   WHERE id = ?""",
+                ('rejected', update_data['rejected_at'], update_data['rejection_reason'],
+                 action.admin_note, application_id)
+            )
+            conn.commit()
+            conn.close()
+        
+        return {
+            "success": True,
+            "message": f"Application rejected",
+            "reason": update_data['rejection_reason']
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error rejecting application: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/vlx/drivers/approve/{application_id}")
+def approve_driver_application(application_id: str, token: str):
+    """
+    Endpoint para aprobar una aplicación de conductor desde el email del admin.
+    Genera un token de registro único y envía email al conductor.
+    """
+    try:
+        # Verificar que existe la aplicación y el token es válido
+        if USE_SUPABASE:
+            result = supabase_client.table('driver_applications')\
+                .select('*')\
+                .eq('id', application_id)\
+                .eq('approval_token', token)\
+                .single()\
+                .execute()
+            
+            if not result.data:
+                raise HTTPException(status_code=404, detail="Application not found or invalid token")
+            
+            application = result.data
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM driver_applications WHERE id = ? AND approval_token = ?",
+                (application_id, token)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Application not found or invalid token")
+            
+            # Convertir row a dict (asumiendo estructura de la tabla)
+            application = {
+                'id': row[0],
+                'full_name': row[1],
+                'email': row[2],
+                'status': row[-3]
+            }
+        
+        # Verificar que está pendiente
+        if application['status'] != 'pending':
+            return {
+                "success": False,
+                "message": f"Esta aplicación ya fue {application['status']}",
+                "status": application['status']
+            }
+        
+        # Generar token de registro (válido por 24 horas)
+        registration_token = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + timedelta(hours=24)
+        
+        # Actualizar aplicación
+        update_data = {
+            'status': 'approved',
+            'approved_at': datetime.utcnow().isoformat(),
+            'registration_token': registration_token,
+            'token_expires_at': expires_at.isoformat()
+        }
+        
+        if USE_SUPABASE:
+            supabase_client.table('driver_applications')\
+                .update(update_data)\
+                .eq('id', application_id)\
+                .execute()
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE driver_applications 
+                   SET status = ?, approved_at = ?, registration_token = ?, token_expires_at = ?
+                   WHERE id = ?""",
+                ('approved', datetime.utcnow().isoformat(), registration_token, expires_at.isoformat(), application_id)
+            )
+            conn.commit()
+            conn.close()
+        
+        # Enviar email al conductor con link de registro
+        email_sent = send_driver_approval_email(
+            driver_email=application['email'],
+            driver_name=application['full_name'],
+            registration_token=registration_token,
+            expires_at=expires_at.strftime("%d/%m/%Y a las %H:%M UTC")
+        )
+        
+        return {
+            "success": True,
+            "message": f"Conductor {application['full_name']} aprobado exitosamente",
+            "email_sent": email_sent,
+            "registration_link_expires": expires_at.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error approving driver: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/vlx/drivers/reject/{application_id}")
+def reject_driver_application(application_id: str, token: str, reason: Optional[str] = "No se proporcionó razón"):
+    """
+    Endpoint para rechazar una aplicación de conductor desde el email del admin.
+    """
+    try:
+        # Verificar que existe la aplicación y el token es válido
+        if USE_SUPABASE:
+            result = supabase_client.table('driver_applications')\
+                .select('*')\
+                .eq('id', application_id)\
+                .eq('approval_token', token)\
+                .single()\
+                .execute()
+            
+            if not result.data:
+                raise HTTPException(status_code=404, detail="Application not found or invalid token")
+            
+            application = result.data
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM driver_applications WHERE id = ? AND approval_token = ?",
+                (application_id, token)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Application not found or invalid token")
+            
+            application = {
+                'id': row[0],
+                'full_name': row[1],
+                'status': row[-3]
+            }
+        
+        # Verificar que está pendiente
+        if application['status'] != 'pending':
+            return {
+                "success": False,
+                "message": f"Esta aplicación ya fue {application['status']}",
+                "status": application['status']
+            }
+        
+        # Actualizar aplicación
+        update_data = {
+            'status': 'rejected',
+            'rejected_at': datetime.utcnow().isoformat(),
+            'rejection_reason': reason
+        }
+        
+        if USE_SUPABASE:
+            supabase_client.table('driver_applications')\
+                .update(update_data)\
+                .eq('id', application_id)\
+                .execute()
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE driver_applications 
+                   SET status = ?, rejected_at = ?, rejection_reason = ?
+                   WHERE id = ?""",
+                ('rejected', datetime.utcnow().isoformat(), reason, application_id)
+            )
+            conn.commit()
+            conn.close()
+        
+        return {
+            "success": True,
+            "message": f"Aplicación de {application['full_name']} rechazada",
+            "reason": reason
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error rejecting driver: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Modelo para registro de conductor
+class DriverRegistration(BaseModel):
+    password: str
+    username: Optional[str] = None
+
+
+@app.post("/api/v1/vlx/drivers/register")
+def register_driver(token: str, registration: DriverRegistration):
+    """
+    Endpoint para que el conductor complete su registro con el token único.
+    Crea cuenta en users con rol 'driver'.
+    """
+    try:
+        # Buscar aplicación con el token de registro válido
+        if USE_SUPABASE:
+            result = supabase_client.table('driver_applications')\
+                .select('*')\
+                .eq('registration_token', token)\
+                .eq('status', 'approved')\
+                .single()\
+                .execute()
+            
+            if not result.data:
+                raise HTTPException(status_code=404, detail="Invalid or expired registration token")
+            
+            application = result.data
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM driver_applications WHERE registration_token = ? AND status = 'approved'",
+                (token,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Invalid or expired registration token")
+            
+            # Convertir a dict (asumiendo estructura)
+            application = {'id': row[0], 'full_name': row[1], 'email': row[2], 'phone': row[3]}
+        
+        # Verificar que el token no haya expirado
+        token_expires = datetime.fromisoformat(application['token_expires_at'].replace('Z', '+00:00'))
+        if datetime.utcnow() > token_expires:
+            raise HTTPException(status_code=400, detail="Registration token has expired")
+        
+        # Verificar que el usuario no exista ya
+        if USE_SUPABASE:
+            existing = supabase_client.table('users')\
+                .select('id')\
+                .eq('email', application['email'])\
+                .execute()
+            
+            if existing.data:
+                raise HTTPException(status_code=400, detail="User already exists")
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users WHERE email = ?", (application['email'],))
+            if cursor.fetchone():
+                conn.close()
+                raise HTTPException(status_code=400, detail="User already exists")
+            conn.close()
+        
+        # Hash de la contraseña
+        hashed_password = bcrypt.hashpw(registration.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # Crear username si no se proporcionó
+        username = registration.username if registration.username else application['email'].split('@')[0]
+        
+        # Crear usuario en tabla users
+        user_data = {
+            'username': username,
+            'email': application['email'],
+            'full_name': application['full_name'],
+            'password': hashed_password,
+            'phone': application.get('phone', ''),
+            'roles': ['driver'],
+            'allowed_apps': ['vanelux', 'vanelux_driver'],
+            'status': 'active',
+            'created_at': datetime.utcnow().isoformat()
+        }
+        
+        if USE_SUPABASE:
+            user_result = supabase_client.table('users').insert(user_data).execute()
+            
+            if not user_result.data:
+                raise HTTPException(status_code=500, detail="Failed to create user")
+            
+            user_id = user_result.data[0]['id']
+            
+            # Invalidar el token de registro (cambiar status a 'registered')
+            supabase_client.table('driver_applications')\
+                .update({'registration_token': None})\
+                .eq('id', application['id'])\
+                .execute()
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO users (username, email, full_name, password, phone, roles, allowed_apps, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (username, application['email'], application['full_name'], hashed_password,
+                 application.get('phone', ''), json.dumps(['driver']), json.dumps(['vanelux', 'vanelux_driver']),
+                 'active', datetime.utcnow().isoformat())
+            )
+            user_id = cursor.lastrowid
+            
+            # Invalidar token
+            cursor.execute(
+                "UPDATE driver_applications SET registration_token = NULL WHERE id = ?",
+                (application['id'],)
+            )
+            conn.commit()
+            conn.close()
+        
+        return {
+            "success": True,
+            "message": "Registration completed successfully",
+            "user_id": user_id,
+            "username": username,
+            "email": application['email']
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in driver registration: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
