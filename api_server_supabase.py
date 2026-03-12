@@ -177,6 +177,21 @@ class ApplicationAction(BaseModel):
     """Modelo para aprobar/rechazar aplicación de conductor"""
     admin_note: Optional[str] = None
 
+class GoogleAuthRequest(BaseModel):
+    """Modelo para autenticación con Google"""
+    id_token: str
+    access_token: Optional[str] = None
+    email: str
+    name: Optional[str] = None
+    photo_url: Optional[str] = None
+
+class FacebookAuthRequest(BaseModel):
+    """Modelo para autenticación con Facebook"""
+    access_token: str
+    email: str
+    name: Optional[str] = None
+    photo_url: Optional[str] = None
+
 # ==================== FUNCIONES DE BASE DE DATOS ====================
 
 def get_user_by_username(username: str):
@@ -201,6 +216,19 @@ def get_user_by_id(user_id: int):
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        user = cur.fetchone()
+        conn.close()
+        return dict(user) if user else None
+
+def get_user_by_email(email: str):
+    """Obtener usuario por email"""
+    if USE_SUPABASE:
+        return SupabaseDB.get_user_by_email(email)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE email = ?", (email,))
         user = cur.fetchone()
         conn.close()
         return dict(user) if user else None
@@ -515,6 +543,158 @@ def register(user: UserCreate):
         allowed_apps=new_user["allowed_apps"],
         status=new_user["status"]
     )
+
+@app.post("/api/v1/auth/google", response_model=TokenResponse)
+def google_auth(auth_data: GoogleAuthRequest):
+    """
+    Autenticación con Google OAuth
+    - Verifica el ID token con Google
+    - Crea usuario si no existe
+    - Retorna access_token y refresh_token
+    """
+    try:
+        # Verificar el ID token con Google
+        google_verify_url = f"https://oauth2.googleapis.com/tokeninfo?id_token={auth_data.id_token}"
+        verify_response = requests.get(google_verify_url)
+        
+        if verify_response.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid Google ID token")
+        
+        token_info = verify_response.json()
+        
+        # Validar que el email coincida
+        if token_info.get("email") != auth_data.email:
+            raise HTTPException(status_code=401, detail="Email mismatch")
+        
+        # Verificar si el usuario ya existe
+        user = get_user_by_email(auth_data.email)
+        
+        if not user:
+            # Crear nuevo usuario con OAuth
+            username = auth_data.email.split('@')[0]
+            password_hash = bcrypt.hashpw(str(uuid.uuid4()).encode(), bcrypt.gensalt()).decode()  # Random password
+            
+            user = create_user_db(
+                username=username,
+                email=auth_data.email,
+                password_hash=password_hash,
+                full_name=auth_data.name or username,
+                roles=["passenger"],
+                allowed_apps=["vanelux"]
+            )
+        
+        # Generar tokens
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(user["id"]), "username": user["username"]},
+            expires_delta=access_token_expires
+        )
+        
+        refresh_token_expires = timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        refresh_token = create_refresh_token(
+            data={"sub": str(user["id"]), "username": user["username"]},
+            expires_delta=refresh_token_expires
+        )
+        
+        # Preparar roles y allowed_apps
+        roles = user["roles"] if isinstance(user["roles"], list) else json.loads(user["roles"])
+        allowed_apps = user["allowed_apps"] if isinstance(user["allowed_apps"], list) else json.loads(user["allowed_apps"])
+        
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            user=UserResponse(
+                id=user["id"],
+                username=user["username"],
+                email=user["email"],
+                full_name=user["full_name"] or user["username"],
+                roles=roles,
+                allowed_apps=allowed_apps,
+                status=user["status"]
+            )
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Google auth error: {e}")
+        raise HTTPException(status_code=500, detail=f"Google authentication failed: {str(e)}")
+
+@app.post("/api/v1/auth/facebook", response_model=TokenResponse)
+def facebook_auth(auth_data: FacebookAuthRequest):
+    """
+    Autenticación con Facebook OAuth
+    - Verifica el access token con Facebook
+    - Crea usuario si no existe
+    - Retorna access_token y refresh_token
+    """
+    try:
+        # Verificar el access token con Facebook
+        fb_verify_url = f"https://graph.facebook.com/me?fields=id,name,email&access_token={auth_data.access_token}"
+        verify_response = requests.get(fb_verify_url)
+        
+        if verify_response.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid Facebook access token")
+        
+        fb_data = verify_response.json()
+        
+        # Validar que el email coincida
+        if fb_data.get("email") != auth_data.email:
+            raise HTTPException(status_code=401, detail="Email mismatch")
+        
+        # Verificar si el usuario ya existe
+        user = get_user_by_email(auth_data.email)
+        
+        if not user:
+            # Crear nuevo usuario con OAuth
+            username = auth_data.email.split('@')[0]
+            password_hash = bcrypt.hashpw(str(uuid.uuid4()).encode(), bcrypt.gensalt()).decode()  # Random password
+            
+            user = create_user_db(
+                username=username,
+                email=auth_data.email,
+                password_hash=password_hash,
+                full_name=auth_data.name or username,
+                roles=["passenger"],
+                allowed_apps=["vanelux"]
+            )
+        
+        # Generar tokens
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(user["id"]), "username": user["username"]},
+            expires_delta=access_token_expires
+        )
+        
+        refresh_token_expires = timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        refresh_token = create_refresh_token(
+            data={"sub": str(user["id"]), "username": user["username"]},
+            expires_delta=refresh_token_expires
+        )
+        
+        # Preparar roles y allowed_apps
+        roles = user["roles"] if isinstance(user["roles"], list) else json.loads(user["roles"])
+        allowed_apps = user["allowed_apps"] if isinstance(user["allowed_apps"], list) else json.loads(user["allowed_apps"])
+        
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            user=UserResponse(
+                id=user["id"],
+                username=user["username"],
+                email=user["email"],
+                full_name=user["full_name"] or user["username"],
+                roles=roles,
+                allowed_apps=allowed_apps,
+                status=user["status"]
+            )
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Facebook auth error: {e}")
+        raise HTTPException(status_code=500, detail=f"Facebook authentication failed: {str(e)}")
 
 @app.get("/api/v1/auth/me", response_model=UserResponse)
 def get_me(current_user: dict = Depends(get_current_user)):
