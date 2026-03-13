@@ -179,7 +179,7 @@ class ApplicationAction(BaseModel):
 
 class GoogleAuthRequest(BaseModel):
     """Modelo para autenticación con Google"""
-    id_token: str
+    id_token: Optional[str] = None
     access_token: Optional[str] = None
     email: str
     name: Optional[str] = None
@@ -553,18 +553,27 @@ def google_auth(auth_data: GoogleAuthRequest):
     - Retorna access_token y refresh_token
     """
     try:
-        # Verificar el ID token con Google
-        google_verify_url = f"https://oauth2.googleapis.com/tokeninfo?id_token={auth_data.id_token}"
-        verify_response = requests.get(google_verify_url)
-        
-        if verify_response.status_code != 200:
-            raise HTTPException(status_code=401, detail="Invalid Google ID token")
-        
-        token_info = verify_response.json()
-        
-        # Validar que el email coincida
-        if token_info.get("email") != auth_data.email:
-            raise HTTPException(status_code=401, detail="Email mismatch")
+        # Verificar token con Google - soporta id_token y access_token
+        if auth_data.id_token:
+            # Verificar usando ID token (flujo nativo/móvil)
+            google_verify_url = f"https://oauth2.googleapis.com/tokeninfo?id_token={auth_data.id_token}"
+            verify_response = requests.get(google_verify_url)
+            if verify_response.status_code != 200:
+                raise HTTPException(status_code=401, detail="Invalid Google ID token")
+            token_info = verify_response.json()
+            if token_info.get("email") != auth_data.email:
+                raise HTTPException(status_code=401, detail="Email mismatch")
+        elif auth_data.access_token:
+            # Verificar usando access token (flujo web con GIS)
+            userinfo_url = f"https://www.googleapis.com/oauth2/v3/userinfo?access_token={auth_data.access_token}"
+            verify_response = requests.get(userinfo_url)
+            if verify_response.status_code != 200:
+                raise HTTPException(status_code=401, detail="Invalid Google access token")
+            token_info = verify_response.json()
+            if token_info.get("email") != auth_data.email:
+                raise HTTPException(status_code=401, detail="Email mismatch")
+        else:
+            raise HTTPException(status_code=400, detail="id_token or access_token required")
         
         # Verificar si el usuario ya existe
         user = get_user_by_email(auth_data.email)
