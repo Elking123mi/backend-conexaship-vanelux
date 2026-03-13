@@ -593,17 +593,11 @@ def google_auth(auth_data: GoogleAuthRequest):
             )
         
         # Generar tokens
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": str(user["id"]), "username": user["username"]},
-            expires_delta=access_token_expires
+            data={"sub": str(user["id"]), "username": user["username"]}
         )
         
-        refresh_token_expires = timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-        refresh_token = create_refresh_token(
-            data={"sub": str(user["id"]), "username": user["username"]},
-            expires_delta=refresh_token_expires
-        )
+        refresh_token, _ = create_refresh_token(user["id"])
         
         # Preparar roles y allowed_apps
         roles = user["roles"] if isinstance(user["roles"], list) else json.loads(user["roles"])
@@ -669,17 +663,11 @@ def facebook_auth(auth_data: FacebookAuthRequest):
             )
         
         # Generar tokens
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": str(user["id"]), "username": user["username"]},
-            expires_delta=access_token_expires
+            data={"sub": str(user["id"]), "username": user["username"]}
         )
         
-        refresh_token_expires = timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-        refresh_token = create_refresh_token(
-            data={"sub": str(user["id"]), "username": user["username"]},
-            expires_delta=refresh_token_expires
-        )
+        refresh_token, _ = create_refresh_token(user["id"])
         
         # Preparar roles y allowed_apps
         roles = user["roles"] if isinstance(user["roles"], list) else json.loads(user["roles"])
