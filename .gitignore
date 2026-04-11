@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+env/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+logistics.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+app_errors.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local env
+.env.local
+
+# Builds
+*.exe
+*.msi
+
+# Card reader data
+card_*.txt
+diag_*.txt
+
+# OneDrive temp
+~$*
