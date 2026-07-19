@@ -109,11 +109,23 @@ app.post('/api/v1/auth/login', async (req, res) => {
     .eq('id', data.user.id)
     .single();
 
+  // Merge profile data into user object for frontend
+  const userWithProfile = {
+    ...data.user,
+    ...(profile || {}),
+    // Sobrescribir con datos del perfil si existen
+    full_name: profile?.full_name || data.user.user_metadata?.full_name,
+    phone: profile?.phone || data.user.user_metadata?.phone,
+    role: profile?.role || 'client',
+    allowed_apps: profile?.allowed_apps || [],
+    email_confirmed: profile?.email_confirmed || false
+  };
+
   res.json({
     success: true,
     token: data.session.access_token,
     refresh_token: data.session.refresh_token,
-    user: { ...data.user, profile: profile || {} }
+    user: userWithProfile
   });
 });
 
@@ -129,6 +141,25 @@ app.post('/api/v1/auth/register', async (req, res) => {
     options: { data: { full_name, phone }, emailRedirectTo: undefined }
   });
   if (error) return res.status(400).json({ success: false, message: error.message });
+
+  // ✅ Crear perfil automáticamente con rol "client" y acceso a ConexaShip
+  if (data.user) {
+    try {
+      await supabase.from('profiles').insert({
+        id: data.user.id,
+        email: data.user.email,
+        full_name: full_name || null,
+        phone: phone || null,
+        role: 'client',
+        allowed_apps: ['conexaship'],
+        email_confirmed: false,
+        created_at: new Date().toISOString()
+      });
+    } catch (profileError) {
+      console.warn('⚠️ Error creando perfil automático:', profileError);
+      // No bloqueamos el registro si falla crear el perfil
+    }
+  }
 
   // Generar y enviar código OTP
   const code = generateOTP();
@@ -268,6 +299,11 @@ app.post('/api/v1/auth/verify-code', async (req, res) => {
       await supabase.auth.admin.updateUserById(stored.userId, {
         email_confirm: true
       });
+      // También actualizar la tabla profiles
+      await supabase
+        .from('profiles')
+        .update({ email_confirmed: true })
+        .eq('id', stored.userId);
     } catch (err) {
       console.warn('No se pudo confirmar email en Supabase:', err.message);
     }
