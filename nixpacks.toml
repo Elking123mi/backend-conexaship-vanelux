@@ -1,0 +1,5 @@
+﻿[phases.setup]
+providers = ["node"]
+
+[start]
+cmd = "node index.js"
