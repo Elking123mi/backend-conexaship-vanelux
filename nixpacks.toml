@@ -1,5 +1,5 @@
 ﻿[phases.setup]
-providers = ["node"]
+nixPkgs = ["nodejs_22"]
 
 [start]
 cmd = "node index.js"
